@@ -420,6 +420,10 @@ jl_code_info_t *jl_new_code_info_from_ir(jl_expr_t *ir)
     jl_code_info_t *li = NULL;
     JL_GC_PUSH1(&li);
     li = jl_new_code_info_uninit();
+
+    jl_expr_t *arglist = (jl_expr_t*)jl_exprarg(ir, 0);
+    li->nargs = jl_array_len(arglist);
+
     assert(jl_is_expr(ir));
     jl_expr_t *bodyex = (jl_expr_t*)jl_exprarg(ir, 2);
 
@@ -623,7 +627,7 @@ JL_DLLEXPORT jl_code_info_t *jl_new_code_info_uninit(void)
     jl_task_t *ct = jl_current_task;
     jl_code_info_t *src =
         (jl_code_info_t*)jl_gc_alloc(ct->ptls, sizeof(jl_code_info_t),
-                                       jl_code_info_type);
+                                     jl_code_info_type);
     src->code = NULL;
     src->debuginfo = NULL;
     src->ssavaluetypes = NULL;
@@ -632,6 +636,7 @@ JL_DLLEXPORT jl_code_info_t *jl_new_code_info_uninit(void)
     src->slotflags = NULL;
     src->slotnames = NULL;
     src->slottypes = jl_nothing;
+    src->rettype = (jl_value_t*)jl_any_type;
     src->parent = (jl_method_instance_t*)jl_nothing;
     src->min_world = 1;
     src->max_world = ~(size_t)0;
@@ -642,6 +647,8 @@ JL_DLLEXPORT jl_code_info_t *jl_new_code_info_uninit(void)
     src->constprop = 0;
     src->inlining = 0;
     src->purity.bits = 0;
+    src->nargs = 0;
+    src->isva = 0;
     src->inlining_cost = UINT16_MAX;
     return src;
 }
@@ -770,18 +777,36 @@ JL_DLLEXPORT jl_code_info_t *jl_code_for_staged(jl_method_instance_t *mi, size_t
                 }
                 jl_error("The function body AST defined by this @generated function is not pure. This likely means it contains a closure, a comprehension or a generator.");
             }
+            // TODO: This should ideally be in the lambda expression,
+            // but currently our isva determination is non-syntactic
+            func->isva = def->isva;
         }
 
         // If this generated function has an opaque closure, cache it for
-        // correctness of method identity
+        // correctness of method identity. In particular, other methods that call
+        // this method may end up referencing it in a PartialOpaque lattice element
+        // type. If the method identity were to change (for the same world age)
+        // in between invocations of this method, that return type inference would
+        // no longer be correct.
         int needs_cache_for_correctness = 0;
         for (int i = 0; i < jl_array_nrows(func->code); ++i) {
             jl_value_t *stmt = jl_array_ptr_ref(func->code, i);
             if (jl_is_expr(stmt) && ((jl_expr_t*)stmt)->head == jl_new_opaque_closure_sym) {
+                if (jl_expr_nargs(stmt) >= 4 && jl_is_bool(jl_exprarg(stmt, 3)) && !jl_unbox_bool(jl_exprarg(stmt, 3))) {
+                    // If this new_opaque_closure is prohibited from sourcing PartialOpaque,
+                    // there is no problem
+                    continue;
+                }
                 if (jl_options.incremental && jl_generating_output())
                     jl_error("Impossible to correctly handle OpaqueClosure inside @generated returned during precompile process.");
                 needs_cache_for_correctness = 1;
                 break;
+            }
+        }
+
+        if (func->edges == jl_nothing && func->max_world == ~(size_t)0) {
+            if (func->min_world != 1) {
+                jl_error("Generated function result with `edges == nothing` and `max_world == typemax(UInt)` must have `min_world == 1`");
             }
         }
 
@@ -953,6 +978,8 @@ JL_DLLEXPORT void jl_method_set_source(jl_method_t *m, jl_code_info_t *src)
         jl_array_ptr_set(copy, i, st);
     }
     src = jl_copy_code_info(src);
+    src->isva = m->isva; // TODO: It would be nice to reverse this
+    assert(m->nargs == src->nargs);
     src->code = copy;
     jl_gc_wb(src, copy);
     m->slot_syms = jl_compress_argnames(src->slotnames);

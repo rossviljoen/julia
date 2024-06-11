@@ -80,7 +80,7 @@ const TAGS = Any[
 const NTAGS = length(TAGS)
 @assert NTAGS == 255
 
-const ser_version = 28 # do not make changes without bumping the version #!
+const ser_version = 29 # do not make changes without bumping the version #!
 
 format_version(::AbstractSerializer) = ser_version
 format_version(s::Serializer) = s.version
@@ -1094,6 +1094,10 @@ function deserialize(s::AbstractSerializer, ::Type{Method})
         if template !== nothing
             # TODO: compress template
             template = template::CodeInfo
+            if format_version(s) < 29
+                template.nargs = nargs
+                template.isva = isva
+            end
             meth.source = template
             meth.debuginfo = template.debuginfo
             if !@isdefined(slot_syms)
@@ -1227,25 +1231,20 @@ function deserialize(s::AbstractSerializer, ::Type{CodeInfo})
     if !pre_12
         ci.slotflags = deserialize(s)
         ci.slottypes = deserialize(s)
-        if format_version(s) <= 26
-            deserialize(s) # rettype
-            ci.parent = deserialize(s)
-            world_or_edges = deserialize(s)
-            pre_13 = isa(world_or_edges, Union{UInt, Int})
-            if pre_13
-                ci.min_world = reinterpret(UInt, world_or_edges)
-                ci.max_world = reinterpret(UInt, deserialize(s))
-            else
-                ci.edges = world_or_edges
-                ci.min_world = deserialize(s)::UInt
-                ci.max_world = deserialize(s)::UInt
-            end
+        ci.rettype = deserialize(s)
+        ci.parent = deserialize(s)
+        world_or_edges = deserialize(s)
+        pre_13 = isa(world_or_edges, Union{UInt, Int})
+        if pre_13
+            ci.min_world = reinterpret(UInt, world_or_edges)
+            ci.max_world = reinterpret(UInt, deserialize(s))
         else
-            ci.parent = deserialize(s)
-            ci.method_for_inference_limit_heuristics = deserialize(s)
-            ci.edges = deserialize(s)
+            ci.edges = world_or_edges
             ci.min_world = deserialize(s)::UInt
             ci.max_world = deserialize(s)::UInt
+        end
+        if format_version(s) >= 26
+            ci.method_for_inference_limit_heuristics = deserialize(s)
         end
     end
     if format_version(s) <= 26
@@ -1259,6 +1258,9 @@ function deserialize(s::AbstractSerializer, ::Type{CodeInfo})
             ci.inlining_cost = inlining_cost
         end
     end
+    if format_version(s) >= 29
+        ci.nargs = deserialize(s)
+    end
     ci.propagate_inbounds = deserialize(s)
     if format_version(s) < 23
         deserialize(s) # `pure` field has been removed
@@ -1268,6 +1270,9 @@ function deserialize(s::AbstractSerializer, ::Type{CodeInfo})
     end
     if format_version(s) >= 24
         ci.nospecializeinfer = deserialize(s)::Bool
+    end
+    if format_version(s) >= 29
+        ci.isva = deserialize(s)::Bool
     end
     if format_version(s) >= 21
         ci.inlining = deserialize(s)::UInt8

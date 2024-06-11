@@ -18,7 +18,7 @@ import Base: USE_BLAS64, abs, acos, acosh, acot, acoth, acsc, acsch, adjoint, as
     typed_hcat, vec, view, zero
 using Base: IndexLinear, promote_eltype, promote_op, print_matrix,
     @propagate_inbounds, reduce, typed_hvcat, typed_vcat, require_one_based_indexing,
-    splat
+    splat, BitInteger
 using Base.Broadcast: Broadcasted, broadcasted
 using Base.PermutedDimsArrays: CommutativeOps
 using OpenBLAS_jll
@@ -190,6 +190,7 @@ end
 abstract type Algorithm end
 struct DivideAndConquer <: Algorithm end
 struct QRIteration <: Algorithm end
+struct RobustRepresentations <: Algorithm end
 
 # Pivoting strategies for matrix factorization algorithms.
 abstract type PivotingStrategy end
@@ -241,6 +242,8 @@ Note that the [element type](@ref eltype) of the matrix must admit [`norm`](@ref
 """
 struct ColumnNorm <: PivotingStrategy end
 
+using Base: DimOrInd
+
 # Check that stride of matrix/vector is 1
 # Writing like this to avoid splatting penalty when called with multiple arguments,
 # see PR 16416
@@ -278,6 +281,28 @@ stride1(x::DenseArray) = stride(x, 1)::Int
 @inline chkstride1(A...) = _chkstride1(true, A...)
 @noinline _chkstride1(ok::Bool) = ok || error("matrix does not have contiguous columns")
 @inline _chkstride1(ok::Bool, A, B...) = _chkstride1(ok & (stride1(A) == 1), B...)
+
+# Subtypes of StridedArrays that satisfy certain properties on their strides
+# Similar to Base.RangeIndex, but only include range types where the step is statically known to be non-zero
+const IncreasingRangeIndex = Union{BitInteger, AbstractUnitRange{<:BitInteger}}
+const NonConstRangeIndex = Union{IncreasingRangeIndex, StepRange{<:BitInteger, <:BitInteger}}
+# StridedArray subtypes for which _fullstride2(::T) === true is known from the type
+DenseOrStridedReshapedReinterpreted{T,N} =
+    Union{DenseArray{T,N}, Base.StridedReshapedArray{T,N}, Base.StridedReinterpretArray{T,N}}
+# Similar to Base.StridedSubArray, except with a NonConstRangeIndex instead of a RangeIndex
+StridedSubArrayStandard{T,N,A<:DenseOrStridedReshapedReinterpreted,
+    I<:Tuple{Vararg{Union{NonConstRangeIndex, Base.ReshapedUnitRange, Base.AbstractCartesianIndex}}}} = Base.StridedSubArray{T,N,A,I}
+StridedArrayStdSubArray{T,N} = Union{DenseOrStridedReshapedReinterpreted{T,N},StridedSubArrayStandard{T,N}}
+# Similar to Base.StridedSubArray, except with a IncreasingRangeIndex instead of a RangeIndex
+StridedSubArrayIncr{T,N,A<:DenseOrStridedReshapedReinterpreted,
+    I<:Tuple{Vararg{Union{IncreasingRangeIndex, Base.ReshapedUnitRange, Base.AbstractCartesianIndex}}}} = Base.StridedSubArray{T,N,A,I}
+StridedArrayStdSubArrayIncr{T,N} = Union{DenseOrStridedReshapedReinterpreted{T,N},StridedSubArrayIncr{T,N}}
+# These subarrays have a stride of 1 along the first dimension
+StridedSubArrayAUR{T,N,A<:DenseOrStridedReshapedReinterpreted,
+    I<:Tuple{AbstractUnitRange{<:BitInteger}}} = Base.StridedSubArray{T,N,A,I}
+StridedArrayStride1{T,N} = Union{DenseOrStridedReshapedReinterpreted{T,N},StridedSubArrayIncr{T,N}}
+# StridedMatrixStride1 may typically be forwarded to LAPACK methods
+StridedMatrixStride1{T} = StridedArrayStride1{T,2}
 
 """
     LinearAlgebra.checksquare(A)
@@ -474,6 +499,33 @@ See also: `copymutable_oftype`.
 """
 copy_similar(A::AbstractArray, ::Type{T}) where {T} = copyto!(similar(A, T, size(A)), A)
 
+"""
+    BandIndex(band, index)
+
+Represent a Cartesian index as a linear index along a band.
+This type is primarily meant to index into a specific band without branches,
+so, for best performance, `band` should be a compile-time constant.
+"""
+struct BandIndex
+    band :: Int
+    index :: Int
+end
+function _cartinds(b::BandIndex)
+    (; band, index) = b
+    bandg0 = max(band,0)
+    row = index - band + bandg0
+    col = index + bandg0
+    CartesianIndex(row, col)
+end
+function Base.to_indices(A, inds, t::Tuple{BandIndex, Vararg{Any}})
+    to_indices(A, inds, (_cartinds(first(t)), Base.tail(t)...))
+end
+function Base.checkbounds(::Type{Bool}, A::AbstractMatrix, b::BandIndex)
+    checkbounds(Bool, A, _cartinds(b))
+end
+function Base.checkbounds(A::Broadcasted, b::BandIndex)
+    checkbounds(A, _cartinds(b))
+end
 
 include("adjtrans.jl")
 include("transpose.jl")
@@ -551,6 +603,10 @@ wrapper_char(A::Hermitian) =  WrapperChar('H', A.uplo == 'U')
 wrapper_char(A::Hermitian{<:Real}) = WrapperChar('S', A.uplo == 'U')
 wrapper_char(A::Symmetric) = WrapperChar('S', A.uplo == 'U')
 
+wrapper_char_NTC(A::AbstractArray) = uppercase(wrapper_char(A)) == 'N'
+wrapper_char_NTC(A::Union{StridedArray, Adjoint, Transpose}) = true
+wrapper_char_NTC(A::Union{Symmetric, Hermitian}) = false
+
 Base.@constprop :aggressive function wrap(A::AbstractVecOrMat, tA::AbstractChar)
     # merge the result of this before return, so that we can type-assert the return such
     # that even if the tmerge is inaccurate, inference can still identify that the
@@ -608,26 +664,6 @@ matprod_dest(A::Diagonal, B::Diagonal, TS) = similar(B, TS)
 
 # Special handling for adj/trans vec
 matprod_dest(A::Diagonal, B::AdjOrTransAbsVec, TS) = similar(B, TS)
-
-# TODO: remove once not used anymore in SparseArrays.jl
-# some trait like this would be cool
-# onedefined(::Type{T}) where {T} = hasmethod(one, (T,))
-# but we are actually asking for oneunit(T), that is, however, defined for generic T as
-# `T(one(T))`, so the question is equivalent for whether one(T) is defined
-onedefined(::Type) = false
-onedefined(::Type{<:Number}) = true
-
-# initialize return array for op(A, B)
-_init_eltype(::typeof(*), ::Type{TA}, ::Type{TB}) where {TA,TB} =
-    (onedefined(TA) && onedefined(TB)) ?
-        typeof(matprod(oneunit(TA), oneunit(TB))) :
-        promote_op(matprod, TA, TB)
-_init_eltype(op, ::Type{TA}, ::Type{TB}) where {TA,TB} =
-    (onedefined(TA) && onedefined(TB)) ?
-        typeof(op(oneunit(TA), oneunit(TB))) :
-        promote_op(op, TA, TB)
-_initarray(op, ::Type{TA}, ::Type{TB}, C) where {TA,TB} =
-    similar(C, _init_eltype(op, TA, TB), size(C))
 
 # General fallback definition for handling under- and overdetermined system as well as square problems
 # While this definition is pretty general, it does e.g. promote to common element type of lhs and rhs
@@ -718,7 +754,7 @@ function peakflops(n::Integer=4096; eltype::DataType=Float64, ntrials::Integer=3
     end
 
     if parallel
-        let Distributed = Base.require_stdlib(Base.PkgId(
+        let Distributed = Base.require(Base.PkgId(
                 Base.UUID((0x8ba89e20_285c_5b6f, 0x9357_94700520ee1b)), "Distributed"))
             nworkers = @invokelatest Distributed.nworkers()
             results = @invokelatest Distributed.pmap(peakflops, fill(n, nworkers))
