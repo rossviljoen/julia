@@ -650,7 +650,7 @@ typedef struct _jl_module_t {
     _Atomic(jl_svec_t*) bindings;
     _Atomic(jl_genericmemory_t*) bindingkeyset; // index lookup by name into bindings
     // hidden fields:
-    arraylist_t usings;  // modules with all bindings potentially imported
+    arraylist_t usings; /* arraylist of struct jl_module_using */  // modules with all bindings potentially imported
     jl_uuid_t build_id;
     jl_uuid_t uuid;
     _Atomic(uint32_t) counter;
@@ -663,6 +663,12 @@ typedef struct _jl_module_t {
     jl_mutex_t lock;
     intptr_t hash;
 } jl_module_t;
+
+struct _jl_module_using {
+    jl_module_t *mod;
+    size_t min_world;
+    size_t max_world;
+};
 
 struct _jl_globalref_t {
     jl_module_t *mod;
