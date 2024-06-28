@@ -513,6 +513,7 @@ function add_call_backedges!(interp::AbstractInterpreter, @nospecialize(rettype)
     if isa(matches, MethodMatches)
         matches.fullmatch || add_mt_backedge!(sv, matches.mt, atype)
     else
+        matches::UnionSplitMethodMatches
         for (thisfullmatch, mt) in zip(matches.fullmatches, matches.mts)
             thisfullmatch || add_mt_backedge!(sv, mt, atype)
         end

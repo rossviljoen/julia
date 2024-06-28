@@ -2214,3 +2214,16 @@ let ir = Base.code_ircode((Issue52644,); optimize_until="Inlining") do t
     @test irfunc(Issue52644(Tuple{})) === :DataType
     @test_throws MethodError irfunc(Issue52644(Tuple{<:Integer}))
 end
+
+foo_split(x::Float64) = 1
+foo_split(x::Int) = 2
+bar_inline_error() = foo_split(nothing)
+bar_split_error() = foo_split(Core.compilerbarrier(:type,nothing))
+
+let src = code_typed1(bar_inline_error, Tuple{})
+    @test count(iscall((src, foo_split)), src.code) == 0 # Should inline method errors
+end
+let src = code_typed1(bar_split_error, Tuple{})
+    @test count(iscall((src, foo_split)), src.code) == 0 # Should inline method errors
+end
+
