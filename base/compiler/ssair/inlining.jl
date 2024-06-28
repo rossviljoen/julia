@@ -75,6 +75,16 @@ function add_inlining_backedge!((; edges, invokesig)::InliningEdgeTracker, mi::M
     return nothing
 end
 
+function add_inlining_mt_backedge!((; edges, invokesig)::InliningEdgeTracker, mt::MethodTable)
+    if invokesig === nothing
+        push!(edges, mi)
+    else # invoke backedge
+        push!(edges, invoke_signature(invokesig), mi)
+    end
+    return nothing
+end
+
+
 function ssa_inlining_pass!(ir::IRCode, state::InliningState, propagate_inbounds::Bool)
     # Go through the function, performing simple inlining (e.g. replacing call by constants
     # and analyzing legality of inlining).
@@ -1410,6 +1420,20 @@ function compute_inlining_cases(@nospecialize(info::CallInfo), flag::UInt32, sig
             result = getresult(info, k)
             handled_all_cases &= handle_any_const_result!(cases,
                 result, match, argtypes, info, flag, state; allow_typevars=true)
+        end
+        if !fully_covered
+            atype = argtypes_to_type(sig.argtypes)
+            # We will emit an inline MethodError so we need a backedged to the MethodTable
+            unwrapped_info = info isa ConstCallInfo ? info.call : info
+            if unwrapped_info isa UnionSplitInfo
+                for mt in unwrapped_info.mts
+                    push!(state.edges, mt, atype)
+                end
+            elseif unwrapped_info isa MethodMatchInfo
+                push!(state.edges, unwrapped_info.mt, atype)
+            else
+                @assert false
+            end
         end
     elseif !isempty(cases)
         # if we've not seen all candidates, union split is valid only for dispatch tuples

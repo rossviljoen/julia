@@ -2948,9 +2948,9 @@ function abstract_applicable(interp::AbstractInterpreter, argtypes::Vector{Any},
         # also need an edge to the method table in case something gets
         # added that did not intersect with any existing method
         if isa(matches, MethodMatches)
-            matches.fullmatch || add_mt_backedge!(sv, matches.mt, atype)
+            matches.fullmatch || add_mt_backedge!(sv, matches.info.mt, atype)
         else
-            for (thisfullmatch, mt) in zip(matches.fullmatches, matches.mts)
+            for (thisfullmatch, mt) in zip(matches.fullmatches, matches.info.mts)
                 thisfullmatch || add_mt_backedge!(sv, mt, atype)
             end
         end
