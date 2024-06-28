@@ -2226,4 +2226,3 @@ end
 let src = code_typed1(bar_split_error, Tuple{})
     @test count(iscall((src, foo_split)), src.code) == 0 # Should inline method errors
 end
-
