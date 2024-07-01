@@ -177,8 +177,7 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(f),
         # there is unanalyzed candidate, widen type and effects to the top
         rettype = excttype = Any
         all_effects = Effects()
-    elseif isa(matches, MethodMatches) ? (!matches.fullmatch || any_ambig(matches)) :
-            (!all(matches.fullmatches) || any_ambig(matches))
+    elseif !fully_covering(matches) || any_ambig(matches)
         # Account for the fact that we may encounter a MethodError with a non-covered or ambiguous signature.
         all_effects = Effects(all_effects; nothrow=false)
         excttype = tmerge(𝕃ₚ, excttype, MethodError)
@@ -238,20 +237,23 @@ struct MethodMatches
     applicable::Vector{Any}
     info::MethodMatchInfo
     valid_worlds::WorldRange
-    fullmatch::Bool
 end
 any_ambig(result::MethodLookupResult) = result.ambig
 any_ambig(info::MethodMatchInfo) = any_ambig(info.results)
 any_ambig(m::MethodMatches) = any_ambig(m.info)
+fully_covering(info::MethodMatchInfo) = info.fullmatch
+fully_covering(m::MethodMatches) = fully_covering(m.info)
 
 struct UnionSplitMethodMatches
     applicable::Vector{Any}
     applicable_argtypes::Vector{Vector{Any}}
     info::UnionSplitInfo
     valid_worlds::WorldRange
-    fullmatches::Vector{Bool}
 end
-any_ambig(m::UnionSplitMethodMatches) = any(any_ambig, m.info.matches)
+any_ambig(info::UnionSplitInfo) = any(any_ambig, info.matches)
+any_ambig(m::UnionSplitMethodMatches) = any_ambig(m.info)
+fully_covering(info::UnionSplitInfo) = all(info.fullmatches)
+fully_covering(m::UnionSplitMethodMatches) = fully_covering(m.info)
 
 function find_method_matches(interp::AbstractInterpreter, argtypes::Vector{Any}, @nospecialize(atype);
                              max_union_splitting::Int = InferenceParams(interp).max_union_splitting,
@@ -305,9 +307,9 @@ function find_union_split_method_matches(interp::AbstractInterpreter, argtypes::
             push!(fullmatches, thisfullmatch)
         end
     end
-    info = UnionSplitInfo(infos, mts)
+    info = UnionSplitInfo(infos, mts, fullmatches)
     return UnionSplitMethodMatches(
-        applicable, applicable_argtypes, info, valid_worlds, fullmatches)
+        applicable, applicable_argtypes, info, valid_worlds)
 end
 
 function find_simple_method_matches(interp::AbstractInterpreter, @nospecialize(atype), max_methods::Int)
@@ -322,10 +324,9 @@ function find_simple_method_matches(interp::AbstractInterpreter, @nospecialize(a
         # (assume this will always be true, so we don't compute / update valid age in this case)
         return FailedMethodMatch("Too many methods matched")
     end
-    info = MethodMatchInfo(matches, mt)
     fullmatch = any(match::MethodMatch->match.fully_covers, matches)
-    return MethodMatches(
-        matches.matches, info, matches.valid_worlds, fullmatch)
+    info = MethodMatchInfo(matches, mt, fullmatch)
+    return MethodMatches(matches.matches, info, matches.valid_worlds)
 end
 
 """
@@ -510,10 +511,10 @@ function add_call_backedges!(interp::AbstractInterpreter, @nospecialize(rettype)
     # also need an edge to the method table in case something gets
     # added that did not intersect with any existing method
     if isa(matches, MethodMatches)
-        matches.fullmatch || add_mt_backedge!(sv, matches.info.mt, atype)
+        fully_covering(matches) || add_mt_backedge!(sv, matches.info.mt, atype)
     else
         matches::UnionSplitMethodMatches
-        for (thisfullmatch, mt) in zip(matches.fullmatches, matches.info.mts)
+        for (thisfullmatch, mt) in zip(matches.info.fullmatches, matches.info.mts)
             thisfullmatch || add_mt_backedge!(sv, mt, atype)
         end
     end

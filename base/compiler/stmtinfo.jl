@@ -28,6 +28,7 @@ not a call to a generic function.
 struct MethodMatchInfo <: CallInfo
     results::MethodLookupResult
     mt::MethodTable
+    fullmatch::Bool
 end
 nsplit_impl(info::MethodMatchInfo) = 1
 getsplit_impl(info::MethodMatchInfo, idx::Int) = (@assert idx == 1; info.results)
@@ -45,6 +46,7 @@ This info is illegal on any statement that is not a call to a generic function.
 struct UnionSplitInfo <: CallInfo
     matches::Vector{MethodLookupResult}
     mts::Vector{MethodTable}
+    fullmatches::Vector{Bool}
 end
 
 nmatches(info::MethodMatchInfo) = length(info.results)
