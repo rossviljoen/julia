@@ -75,16 +75,6 @@ function add_inlining_backedge!((; edges, invokesig)::InliningEdgeTracker, mi::M
     return nothing
 end
 
-function add_inlining_mt_backedge!((; edges, invokesig)::InliningEdgeTracker, mt::MethodTable)
-    if invokesig === nothing
-        push!(edges, mi)
-    else # invoke backedge
-        push!(edges, invoke_signature(invokesig), mi)
-    end
-    return nothing
-end
-
-
 function ssa_inlining_pass!(ir::IRCode, state::InliningState, propagate_inbounds::Bool)
     # Go through the function, performing simple inlining (e.g. replacing call by constants
     # and analyzing legality of inlining).
@@ -634,11 +624,11 @@ function ir_inline_method_error!(compact::IncrementalCompact, idx::Int, argexprs
     world_age_stmt = Expr(:foreigncall, :(:jl_get_tls_world_age), UInt, svec(), 0, :(:ccall))
     flags = recompute_effects_flags(optimizer_lattice(interp), world_age_stmt, UInt, compact)
     world_age = insert_node_here!(compact, NewInstruction(world_age_stmt, UInt, NoCallInfo(), line, flags))
-    argtuple = insert_node_here!(compact, NewInstruction(Expr(:call, tuple, argexprs[2:end]...), Tuple, line))
+    argtuple = insert_node_here!(compact, NewInstruction(Expr(:call, GlobalRef(Core, :tuple), argexprs[2:end]...), Tuple, line))
 
     methoderr_stmt = Expr(:new, MethodError, argexprs[1], argtuple, world_age)
     methoderr = insert_node_here!(compact, NewInstruction(methoderr_stmt, MethodError, line))
-    insert_node_here!(compact, NewInstruction(Expr(:call, throw, methoderr), Union{}, line))
+    insert_node_here!(compact, NewInstruction(Expr(:call, GlobalRef(Core, :throw), methoderr), Union{}, line))
     insert_node_here!(compact, NewInstruction(ReturnNode(), Union{}, line))
 end
 
@@ -1536,7 +1526,7 @@ function concrete_result_item(result::ConcreteResult, @nospecialize(info::CallIn
 end
 
 function handle_cases!(todo::Vector{Pair{Int,Any}}, ir::IRCode, idx::Int, stmt::Expr,
-    @nospecialize(atype), cases::Vector{InliningCase}, handled_all_cases, fully_covered,
+    @nospecialize(atype), cases::Vector{InliningCase}, handled_all_cases::Bool, fully_covered::Bool,
     joint_effects::Effects)
     # If we only have one case and that case is fully covered, we may either
     # be able to do the inlining now (for constant cases), or push it directly
