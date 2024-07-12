@@ -479,7 +479,7 @@ end
 @test f15259(1,2) == (1,2,1,2)
 # check that error cases are still correct
 @eval g15259(x,y) = (a = $(Expr(:new, :A15259, :x, :y)); a.z)
-@test_throws ErrorException g15259(1,1)
+@test_throws FieldError g15259(1,1)
 @eval h15259(x,y) = (a = $(Expr(:new, :A15259, :x, :y)); getfield(a, 3))
 @test_throws BoundsError h15259(1,1)
 
@@ -2564,6 +2564,14 @@ Base.return_types(intermustalias_edgecase, (Any,); interp=MustAliasInterpreter()
 @test Base.return_types((Any,); interp=MustAliasInterpreter()) do x
     intermustalias_edgecase(x)
 end |> only === Core.Compiler.InterMustAlias
+
+@test Base.infer_return_type((AliasableField,Integer,); interp=MustAliasInterpreter()) do a, x
+    s = (;x)
+    if getfield(a, :f) isa Symbol
+        return getfield(s, getfield(a, :f))
+    end
+    return 0
+end == Integer
 
 function f25579(g)
     h = g[]
