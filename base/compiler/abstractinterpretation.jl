@@ -286,7 +286,7 @@ function find_union_split_method_matches(interp::AbstractInterpreter, argtypes::
         if matches === nothing
             return FailedMethodMatch("For one of the union split cases, too many methods matched")
         end
-        push!(infos, MethodMatchInfo(matches))
+        push!(infos, MethodMatchInfo(matches, sig_n, mt))
         for m in matches
             push!(applicable, m)
             push!(applicable_argtypes, arg_n)
@@ -323,7 +323,7 @@ function find_simple_method_matches(interp::AbstractInterpreter, @nospecialize(a
         # (assume this will always be true, so we don't compute / update valid age in this case)
         return FailedMethodMatch("Too many methods matched")
     end
-    info = MethodMatchInfo(matches)
+    info = MethodMatchInfo(matches, atype, mt)
     fullmatch = any(match::MethodMatch->match.fully_covers, matches)
     return MethodMatches(
         matches.matches, info, matches.valid_worlds, mt, fullmatch)
@@ -2053,7 +2053,7 @@ function abstract_invoke(interp::AbstractInterpreter, (; fargs, argtypes)::ArgIn
         end
     end
     rt = from_interprocedural!(interp, rt, sv, arginfo, sig)
-    info = InvokeCallInfo(match, const_result)
+    info = InvokeCallInfo(match, const_result, lookupsig)
     edge !== nothing && add_invoke_backedge!(sv, lookupsig, edge)
     return CallMeta(rt, Any, effects, info)
 end
