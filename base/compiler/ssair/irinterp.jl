@@ -434,12 +434,6 @@ function _ir_abstract_constant_propagation(interp::AbstractInterpreter, irsv::IR
         (nothrow | noub) || break
     end
 
-    if last(irsv.valid_worlds) >= get_world_counter()
-        # if we aren't cached, we don't need this edge
-        # but our caller might, so let's just make it anyways
-        store_backedges(frame_instance(irsv), irsv.edges)
-    end
-
     return Pair{Any,Tuple{Bool,Bool}}(maybe_singleton_const(ultimate_rt), (nothrow, noub))
 end
 
