@@ -32,7 +32,6 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(f),
     update_valid_age!(sv, valid_worlds)
     napplicable = length(applicable)
     rettype = excttype = Bottom
-    edges = MethodInstance[]
     conditionals = nothing # keeps refinement information of call argument types when the return type is boolean
     seen = 0               # number of signatures actually inferred
     const_results = nothing # or const_results::Vector{Union{Nothing,ConstResult}} if any const results are available
@@ -88,7 +87,6 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(f),
                     end
                     const_results[i] = const_result
                 end
-                edge === nothing || push!(edges, edge)
                 this_rt = tmerge(this_rt, rt)
                 this_exct = tmerge(this_exct, exct)
                 if bail_out_call(interp, this_rt, sv)
@@ -145,7 +143,6 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(f),
                 end
                 const_results[i] = const_result
             end
-            edge === nothing || push!(edges, edge)
         end
         @assert !(this_conditional isa Conditional || this_rt isa MustAlias) "invalid lattice element returned from inter-procedural context"
         seen += 1
