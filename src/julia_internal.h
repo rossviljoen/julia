@@ -874,8 +874,6 @@ STATIC_INLINE int is_anonfn_typename(char *name) JL_NOTSAFEPOINT
 // we mangled the name of the outermost enclosing function in their name).
 STATIC_INLINE int is_canonicalized_anonfn_typename(char *name) JL_NOTSAFEPOINT
 {
-    if (name[0] != '#')
-        return 0;
     char *delim = strchr(&name[1], '#');
     if (delim == NULL)
         return 0;

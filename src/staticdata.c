@@ -74,8 +74,6 @@ External links:
 #include <stdio.h> // printf
 #include <inttypes.h> // PRIxPTR
 
-#include "support/strhash.h"
-
 #include "julia.h"
 #include "julia_internal.h"
 #include "julia_gcext.h"
@@ -3563,7 +3561,6 @@ static void jl_restore_system_image_from_stream_(ios_t *f, jl_image_t *image, jl
                 memcpy(newitems, mod->usings.items, mod->usings.len * sizeof(void*));
                 mod->usings.items = newitems;
             }
-            mod->counter_table = NULL;
         }
         else {
             abort();

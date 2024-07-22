@@ -225,12 +225,11 @@
                  (if lb (list lb ub) (list ub))
                  (if lb (list lb '(core Any)) '())))))
 
-;; check if x is of the form (method <name>) or (method (outerref <name>))
 (define (is-method? x)
   (if (and (pair? x) (eq? (car x) 'method))
       (let ((name (cadr x)))
-        (if (and (pair? name) (eq? (car name) 'outerref))
-            (let ((name (cadr name)))
+        (if (and (pair? name) (eq? (car name) 'globalref))
+            (let ((name (caddr name)))
               (if (symbol? name)
                   #t
                   #f))
@@ -4317,7 +4316,7 @@ f(x) = yt(x)
 
 (define (cl-convert e fname lam namemap defined toplevel interp opaq (globals (table)) (locals (table)))
   (let ((parsed-method-stack '()))
-    (cl-convert-- e fname lam namemap defined toplevel interp opaq parsed-method-stack globals locals)))
+    (cl-convert- e fname lam namemap defined toplevel interp opaq parsed-method-stack globals locals)))
 
 (define (closure-convert e) (cl-convert e #f #f (table) (table) #f #f #f))
 
