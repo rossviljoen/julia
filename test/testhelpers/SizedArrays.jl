@@ -64,6 +64,10 @@ function Base.similar(::Type{A}, shape::Tuple{SOneTo, Vararg{SOneTo}}) where {A<
     R = similar(A, length.(shape))
     SizedArray{length.(shape)}(R)
 end
+function Base.similar(S::SizedArray, ::Type{T}, shape::Tuple{SOneTo, Vararg{SOneTo}}) where {T}
+    R = similar(parent(S), T, length.(shape))
+    SizedArray{length.(shape)}(R)
+end
 
 const SizedMatrixLike = Union{SizedMatrix, Transpose{<:Any, <:SizedMatrix}, Adjoint{<:Any, <:SizedMatrix}}
 
