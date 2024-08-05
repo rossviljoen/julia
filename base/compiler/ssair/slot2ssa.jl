@@ -864,15 +864,21 @@ function construct_ssa!(ci::CodeInfo, ir::IRCode, sv::OptimizationState,
     # Renumber SSA values
     @assert isempty(ir.stmts.type)
     resize!(ir.stmts.type, nstmts)
+    jwn && println(sv.linfo)
+    jwn && println(ir.stmts.stmt)
+    jwn && println(new_code)
     for i in 1:nstmts
         local node = ir.stmts[i]
         node[:stmt] = new_to_regular(renumber_ssa!(new_code[i], ssavalmap), nstmts)
         node[:type] = ssavaluetypes[i]
     end
+    jwn && println(new_nodes)
     for i = 1:length(new_nodes)
         local node = new_nodes.stmts[i]
         node[:stmt] = new_to_regular(renumber_ssa!(node[:stmt], ssavalmap), nstmts)
     end
+    jwn && println(ir.stmts.stmt)
     @timeit "domsort" ir = domsort_ssa!(ir, domtree)
     return ir
 end
+jwn = false

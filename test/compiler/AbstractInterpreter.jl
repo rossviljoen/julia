@@ -414,10 +414,13 @@ function CC.abstract_call(interp::NoinlineInterpreter,
     arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.InferenceState, max_methods::Int)
     ret = @invoke CC.abstract_call(interp::CC.AbstractInterpreter,
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.InferenceState, max_methods::Int)
-    if sv.mod in noinline_modules(interp)
-        return CC.CallMeta(ret.rt, ret.exct, ret.effects, NoinlineCallInfo(ret.info))
+    return CC.Future{CC.CallMeta}(ret.completed, interp, sv) do interp, sv
+        if sv.mod in noinline_modules(interp)
+            (;rt, exct, effects, info) = CC.getindex(ret)
+            return CC.CallMeta(rt, exct, effects, NoinlineCallInfo(info))
+        end
+        return CC.getindex(ret)
     end
-    return ret
 end
 function CC.src_inlining_policy(interp::NoinlineInterpreter,
     @nospecialize(src), @nospecialize(info::CallInfo), stmt_flag::UInt32)

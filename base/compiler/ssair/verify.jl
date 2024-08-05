@@ -25,6 +25,7 @@ is_toplevel_expr_head(head::Symbol) = head === :global || head === :method || he
 is_value_pos_expr_head(head::Symbol) = head === :static_parameter
 function check_op(ir::IRCode, domtree::DomTree, @nospecialize(op), use_bb::Int, use_idx::Int, printed_use_idx::Int, print::Bool, isforeigncall::Bool, arg_idx::Int, allow_frontend_forms::Bool)
     if isa(op, SSAValue)
+        op.id > 0 || @verify_error "Def ($(op.id)) is invalid in final IR"
         if op.id > length(ir.stmts)
             def_bb = block_for_inst(ir.cfg, ir.new_nodes.info[op.id - length(ir.stmts)].pos)
         else

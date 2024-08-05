@@ -251,6 +251,7 @@ mutable struct InferenceState
     stmt_info::Vector{CallInfo}
 
     #= intermediate states for interprocedural abstract interpretation =#
+    tasks::Vector{Consumer}
     pclimitations::IdSet{InferenceState} # causes of precision restrictions (LimitedAccuracy) on currpc ssavalue
     limitations::IdSet{InferenceState} # causes of precision restrictions (LimitedAccuracy) on return
     cycle_backedges::Vector{Tuple{InferenceState, Int}} # call-graph backedges connecting from callee to caller
@@ -328,6 +329,7 @@ mutable struct InferenceState
         limitations = IdSet{InferenceState}()
         cycle_backedges = Vector{Tuple{InferenceState,Int}}()
         callstack = AbsIntState[]
+        tasks = Consumer[]
 
         valid_worlds = WorldRange(1, get_world_counter())
         bestguess = Bottom
@@ -351,7 +353,7 @@ mutable struct InferenceState
         this = new(
             mi, world, mod, sptypes, slottypes, src, cfg, method_info,
             currbb, currpc, ip, handler_info, ssavalue_uses, bb_vartables, ssavaluetypes, stmt_edges, stmt_info,
-            pclimitations, limitations, cycle_backedges, callstack, 0, 0, 0,
+            tasks, pclimitations, limitations, cycle_backedges, callstack, 0, 0, 0,
             result, unreachable, valid_worlds, bestguess, exc_bestguess, ipo_effects,
             restrict_abstract_call_sites, cache_mode, insert_coverage,
             interp)
@@ -800,6 +802,7 @@ mutable struct IRInterpretationState
     const ssa_refined::BitSet
     const lazyreachability::LazyCFGReachability
     valid_worlds::WorldRange
+    const tasks::Vector{Consumer}
     const edges::Vector{Any}
     callstack #::Vector{AbsIntState}
     frameid::Int
@@ -825,10 +828,11 @@ mutable struct IRInterpretationState
         ssa_refined = BitSet()
         lazyreachability = LazyCFGReachability(ir)
         valid_worlds = WorldRange(min_world, max_world == typemax(UInt) ? get_world_counter() : max_world)
+        tasks = Consumer[]
         edges = Any[]
         callstack = AbsIntState[]
         return new(method_info, ir, mi, world, curridx, argtypes_refined, ir.sptypes, tpdum,
-                ssa_refined, lazyreachability, valid_worlds, edges, callstack, 0, 0)
+                ssa_refined, lazyreachability, valid_worlds, tasks, edges, callstack, 0, 0)
     end
 end
 

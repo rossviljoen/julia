@@ -1,4 +1,54 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
+#
+# Functions to fix up:
+#   abstract_eval_statement_expr
+
+const Consumer = Any
+mutable struct Future{T}
+    x::T
+    completed::Bool
+    Future{T}() where {T} = (f = new{T}(); f.completed = false; f)
+    Future{T}(x) where {T} = new{T}(x, true)
+    Future(x::T) where {T} = new{T}(x, true)
+end
+getindex(f::Future) = (@assert f.completed; f.x)
+setindex!(f::Future, v) = (@assert !f.completed; f.completed = true; f.x = v; f)
+function Future{T}(f, tasks::Vector{Consumer}, immediate::Bool) where {T}
+    if immediate
+        return Future{T}(f(tasks))
+    else
+        @assert applicable(f, tasks)
+        result = Future{T}()
+        push!(tasks, function (tasks)
+            result[] = f(tasks)
+            nothing # TODO(jwn): return true
+        end)
+        return result
+    end
+end
+#function initwork(tasks::Vector{Consumer})
+#    push!(tasks, function(tasks)
+#            println("1")
+#            push!(tasks, function(tasks)
+#                    println("2")
+#                    true
+#                end)
+#            true
+#        end)
+#    push!(tasks, function(tasks)
+#            println("3")
+#        end)
+#    true
+#end
+function workloop(tasks::Vector{Consumer})
+    while !isempty(tasks)
+        prev = length(tasks)
+        task = pop!(tasks)
+        task(tasks) # TODO(jwn): || push!(tasks, task)
+        reverse!(tasks, prev) # efficient post-order visitor: items pushed are executed in reverse post order such that later items are executed before earlier ones, but are fully executed (including any dependencies scheduled by them) before going on to the next item
+    end
+end
+
 
 """
     AbstractInterpreter
