@@ -1418,7 +1418,7 @@ end
         callinfo = abstract_call(interp, ArgInfo(nothing, Any[op, TF, v]), StmtInfo(true), sv, #=max_methods=#1)
         TF = Core.Box(TF)
         RT = Core.Box(RT)
-        return Future{CallMeta}(sv.tasks, callinfo.completed) do tasks
+        return Future{CallMeta}(callinfo.completed, interp, sv) do interp, sv
             TF = TF.contents
             RT = RT.contents
             TF2 = tmeet(callinfo[].rt, widenconst(TF))
@@ -2941,7 +2941,7 @@ function return_type_tfunc(interp::AbstractInterpreter, argtypes::Vector{Any}, s
     end
     call = abstract_call(interp, ArgInfo(nothing, argtypes_vec), si, sv, #=max_methods=#-1)
     tt = Core.Box(tt)
-    return Future{CallMeta}(sv.tasks, call.completed) do tasks
+    return Future{CallMeta}(call.completed, interp, sv) do interp, sv
         if isa(sv, InferenceState)
             sv.restrict_abstract_call_sites = old_restrict
         end

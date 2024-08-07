@@ -52,7 +52,7 @@ end
 function abstract_call(interp::AbstractInterpreter, arginfo::ArgInfo, irsv::IRInterpretationState)
     si = StmtInfo(true) # TODO better job here?
     call = abstract_call(interp, arginfo, si, irsv)::Future
-    Future{Nothing}(irsv.tasks, call.completed) do tasks
+    Future{Nothing}(call.completed, interp, irsv) do interp, irsv
         irsv.ir.stmts[irsv.curridx][:info] = call[].info
         nothing
     end
@@ -148,7 +148,8 @@ function reprocess_instruction!(interp::AbstractInterpreter, inst::Instruction, 
             head === :static_parameter || head === :isdefined || head === :boundscheck)
             @assert isempty(irsv.tasks) # jwn
             result = abstract_eval_statement_expr(interp, stmt, nothing, irsv)
-            workloop(reverse!(irsv.tasks))
+            reverse!(irsv.tasks)
+            workloop(interp, irsv)
             result isa Future && (result = result[])
             (; rt, effects) = result
             add_flag!(inst, flags_for_effects(effects))
