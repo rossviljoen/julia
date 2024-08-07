@@ -727,37 +727,7 @@ function abstract_call_method(interp::AbstractInterpreter,
         sparams = recomputed[2]::SimpleVector
     end
 
-    result = Future{MethodCallResult}()
-    sig = Core.Box(sig)
-    push!(sv.tasks, function (interp, sv)
-        (; rt, exct, edge, effects, volatile_inf_result) = typeinf_edge(interp, method, sig.contents, sparams, sv)
-
-        if edge === nothing
-            edgecycle = edgelimited = true
-        end
-
-        # we look for the termination effect override here as well, since the :terminates effect
-        # may have been tainted due to recursion at this point even if it's overridden
-        if is_effect_overridden(sv, :terminates_globally)
-            # this frame is known to terminate
-            effects = Effects(effects, terminates=true)
-        elseif is_effect_overridden(method, :terminates_globally)
-            # this edge is known to terminate
-            effects = Effects(effects; terminates=true)
-        elseif edgecycle
-            # Some sort of recursion was detected.
-            if edge !== nothing && !edgelimited && !is_edge_recursed(edge, sv)
-                # no `MethodInstance` cycles -- don't taint :terminate
-            else
-                # we cannot guarantee that the call will terminate
-                effects = Effects(effects; terminates=false)
-            end
-        end
-
-        result[] = MethodCallResult(rt, exct, edgecycle, edgelimited, edge, effects, volatile_inf_result)
-        return true
-    end)
-    return result
+    return typeinf_edge(interp, method, sig, sparams, sv, edgecycle, edgelimited)
 end
 
 function edge_matches_sv(interp::AbstractInterpreter, frame::AbsIntState,
@@ -1319,7 +1289,7 @@ const_prop_result(inf_result::InferenceResult) =
                      inf_result.ipo_effects, inf_result.linfo)
 
 # return cached result of constant analysis
-return_cached_result(::AbstractInterpreter, inf_result::InferenceResult, ::AbsIntState) =
+return_localcache_result(::AbstractInterpreter, inf_result::InferenceResult, ::AbsIntState) =
     const_prop_result(inf_result)
 
 function compute_forwarded_argtypes(interp::AbstractInterpreter, arginfo::ArgInfo, sv::AbsIntState)
@@ -1349,7 +1319,7 @@ function const_prop_call(interp::AbstractInterpreter,
             return nothing
         end
         @assert inf_result.linfo === mi "MethodInstance for cached inference result does not match"
-        return return_cached_result(interp, inf_result, sv)
+        return return_localcache_result(interp, inf_result, sv)
     end
     overridden_by_const = falses(length(argtypes))
     for i = 1:length(argtypes)
@@ -1875,7 +1845,7 @@ function abstract_apply(interp::AbstractInterpreter, argtypes::Vector{Any}, si::
                     # there is unanalyzed candidate, widen type and effects to the top
                     let retinfo = NoCallInfo() # NOTE this is necessary to prevent the inlining processing
                         applyresult[] = CallMeta(Any, Any, Effects(), retinfo)
-                        return
+                        return true
                     end
                 end
             end

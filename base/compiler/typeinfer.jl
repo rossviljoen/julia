@@ -837,15 +837,43 @@ struct EdgeCallResult
 end
 
 # return cached result of regular inference
-function return_cached_result(::AbstractInterpreter, codeinst::CodeInstance, caller::AbsIntState)
+function return_cached_result(interp::AbstractInterpreter, method::Method, codeinst::CodeInstance, caller::AbsIntState, edgecycle::Bool, edgelimited::Bool)
     rt = cached_return_type(codeinst)
     effects = ipo_effects(codeinst)
     update_valid_age!(caller, WorldRange(min_world(codeinst), max_world(codeinst)))
-    return EdgeCallResult(rt, codeinst.exctype, codeinst.def, effects)
+    return Future(EdgeCall_to_MethodCall_Result(interp, caller, method, EdgeCallResult(rt, codeinst.exctype, codeinst.def, effects), edgecycle, edgelimited))
+end
+
+function EdgeCall_to_MethodCall_Result(interp::AbstractInterpreter, sv::AbsIntState, method::Method, result::EdgeCallResult, edgecycle::Bool, edgelimited::Bool)
+    (; rt, exct, edge, effects, volatile_inf_result) = result
+
+    if edge === nothing
+        edgecycle = edgelimited = true
+    end
+
+    # we look for the termination effect override here as well, since the :terminates effect
+    # may have been tainted due to recursion at this point even if it's overridden
+    if is_effect_overridden(sv, :terminates_globally)
+        # this frame is known to terminate
+        effects = Effects(effects, terminates=true)
+    elseif is_effect_overridden(method, :terminates_globally)
+        # this edge is known to terminate
+        effects = Effects(effects; terminates=true)
+    elseif edgecycle
+        # Some sort of recursion was detected.
+        if edge !== nothing && !edgelimited && !is_edge_recursed(edge, sv)
+            # no `MethodInstance` cycles -- don't taint :terminate
+        else
+            # we cannot guarantee that the call will terminate
+            effects = Effects(effects; terminates=false)
+        end
+    end
+
+    return MethodCallResult(rt, exct, edgecycle, edgelimited, edge, effects, volatile_inf_result)
 end
 
 # compute (and cache) an inferred AST and return the current best estimate of the result type
-function typeinf_edge(interp::AbstractInterpreter, method::Method, @nospecialize(atype), sparams::SimpleVector, caller::AbsIntState)
+function typeinf_edge(interp::AbstractInterpreter, method::Method, @nospecialize(atype), sparams::SimpleVector, caller::AbsIntState, edgecycle::Bool, edgelimited::Bool)
     mi = specialize_method(method, atype, sparams)::MethodInstance
     cache_mode = CACHE_MODE_GLOBAL # cache edge targets globally by default
     force_inline = is_stmt_inline(get_curr_ssaflag(caller))
@@ -859,13 +887,13 @@ function typeinf_edge(interp::AbstractInterpreter, method::Method, @nospecialize
                 cache_mode = CACHE_MODE_VOLATILE
             else
                 @assert codeinst.def === mi "MethodInstance for cached edge does not match"
-                return return_cached_result(interp, codeinst, caller)
+                return return_cached_result(interp, method, codeinst, caller, edgecycle, edgelimited)
             end
         end
     end
     if ccall(:jl_get_module_infer, Cint, (Any,), method.module) == 0 && !generating_output(#=incremental=#false)
         add_remark!(interp, caller, "Inference is disabled for the target module")
-        return EdgeCallResult(Any, Any, nothing, Effects())
+        return Future(EdgeCall_to_MethodCall_Result(interp, caller, method, EdgeCallResult(Any, Any, nothing, Effects()), edgecycle, edgelimited))
     end
     if !is_cached(caller) && frame_parent(caller) === nothing
         # this caller exists to return to the user
@@ -886,7 +914,7 @@ function typeinf_edge(interp::AbstractInterpreter, method::Method, @nospecialize
                         cache_mode = CACHE_MODE_VOLATILE
                     else
                         @assert codeinst.def === mi "MethodInstance for cached edge does not match"
-                        return return_cached_result(interp, codeinst, caller)
+                        return return_cached_result(interp, method, codeinst, caller, edgecycle, edgelimited)
                     end
                 end
             end
@@ -902,30 +930,36 @@ function typeinf_edge(interp::AbstractInterpreter, method::Method, @nospecialize
             if cache_mode == CACHE_MODE_GLOBAL
                 engine_reject(interp, ci)
             end
-            return EdgeCallResult(Any, Any, nothing, Effects())
+            return Future(EdgeCall_to_MethodCall_Result(interp, caller, method, EdgeCallResult(Any, Any, nothing, Effects()), edgecycle, edgelimited))
         end
         assign_parentchild!(frame, caller)
-        typeinf(interp, frame)
-        update_valid_age!(caller, frame.valid_worlds)
-        isinferred = is_inferred(frame)
-        edge = isinferred ? mi : nothing
-        effects = isinferred ? frame.result.ipo_effects : # effects are adjusted already within `finish` for ipo_effects
-            adjust_effects(effects_for_cycle(frame.ipo_effects), method)
-        exc_bestguess = refine_exception_type(frame.exc_bestguess, effects)
-        # propagate newly inferred source to the inliner, allowing efficient inlining w/o deserialization:
-        # note that this result is cached globally exclusively, so we can use this local result destructively
-        volatile_inf_result = isinferred ? VolatileInferenceResult(result) : nothing
-        return EdgeCallResult(frame.bestguess, exc_bestguess, edge, effects, volatile_inf_result)
+        # split off the rest of this (the recursion call) into a separate work thunk
+        recursive = false
+        return Future{MethodCallResult}(recursive, interp, caller) do interp, caller
+            typeinf(interp, frame)
+            update_valid_age!(caller, frame.valid_worlds)
+            local isinferred = is_inferred(frame)
+            local edge = isinferred ? mi : nothing
+            local effects = isinferred ? frame.result.ipo_effects : # effects are adjusted already within `finish` for ipo_effects
+                adjust_effects(effects_for_cycle(frame.ipo_effects), method)
+            local exc_bestguess = refine_exception_type(frame.exc_bestguess, effects)
+            # propagate newly inferred source to the inliner, allowing efficient inlining w/o deserialization:
+            # note that this result is cached globally exclusively, so we can use this local result destructively
+            local volatile_inf_result = isinferred ? VolatileInferenceResult(result) : nothing
+            local edgeresult = EdgeCallResult(frame.bestguess, exc_bestguess, edge, effects, volatile_inf_result)
+            return EdgeCall_to_MethodCall_Result(interp, caller, method, edgeresult, edgecycle, edgelimited)
+        end
     elseif frame === true
         # unresolvable cycle
-        return EdgeCallResult(Any, Any, nothing, Effects())
+        return Future(EdgeCall_to_MethodCall_Result(interp, caller, method, EdgeCallResult(Any, Any, nothing, Effects()), edgecycle, edgelimited))
     end
     # return the current knowledge about this cycle
     frame = frame::InferenceState
     update_valid_age!(caller, frame.valid_worlds)
     effects = adjust_effects(effects_for_cycle(frame.ipo_effects), method)
     exc_bestguess = refine_exception_type(frame.exc_bestguess, effects)
-    return EdgeCallResult(frame.bestguess, exc_bestguess, nothing, effects)
+    edgeresult = EdgeCallResult(frame.bestguess, exc_bestguess, nothing, effects)
+    return Future(EdgeCall_to_MethodCall_Result(interp, caller, method, edgeresult, edgecycle, edgelimited))
 end
 
 # The `:terminates` effect bit must be conservatively tainted unless recursion cycle has
