@@ -1141,6 +1141,8 @@ mutable struct Future{T}
 end
 getindex(f::Future) = (@assert f.completed; f.x)
 setindex!(f::Future, v) = (@assert !f.completed; f.completed = true; f.x = v; f)
+convert(::Type{Future{T}}, x) where {T} = Future{T}(x) # support return type conversion
+convert(::Type{Future{T}}, x::Future) where {T} = x::Future{T}
 function Future{T}(f, immediate::Bool, interp::AbstractInterpreter, sv::AbsIntState) where {T}
     if immediate
         return Future{T}(f(interp, sv))

@@ -2593,6 +2593,7 @@ function abstract_eval_value_expr(interp::AbstractInterpreter, e::Expr, sv::AbsI
         # TODO: We still have non-linearized cglobal
         @assert e.args[1] === Core.tuple || e.args[1] === GlobalRef(Core, :tuple)
     else
+        @assert e.head !== :(=)
         # Some of our tests expect us to handle invalid IR here and error later
         # - permit that for now.
         # @assert false "Unexpected EXPR head in value position"
@@ -2896,7 +2897,7 @@ function abstract_eval_static_parameter(::AbstractInterpreter, e::Expr, sv::AbsI
 end
 
 function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtypes::Union{VarTable,Nothing},
-                                      sv::AbsIntState)
+                                      sv::AbsIntState)::Future{RTEffects}
     ehead = e.head
     if ehead === :call
         return abstract_eval_call(interp, e, vtypes, sv)
@@ -2994,48 +2995,7 @@ function stmt_taints_inbounds_consistency(sv::AbsIntState)
     return has_curr_ssaflag(sv, IR_FLAG_INBOUNDS)
 end
 
-function abstract_eval_statement(interp::AbstractInterpreter, @nospecialize(e), vtypes::VarTable, sv::InferenceState)
-    if !isa(e, Expr)
-        if isa(e, PhiNode)
-            add_curr_ssaflag!(sv, IR_FLAGS_REMOVABLE)
-            # Implement convergence for PhiNodes. In particular, PhiNodes need to tmerge over
-            # the incoming values from all iterations, but `abstract_eval_phi` will only tmerge
-            # over the first and last iterations. By tmerging in the current old_rt, we ensure that
-            # we will not lose an intermediate value.
-            rt = abstract_eval_phi(interp, e, vtypes, sv)
-            old_rt = sv.ssavaluetypes[sv.currpc]
-            rt = old_rt === NOT_FOUND ? rt : tmerge(typeinf_lattice(interp), old_rt, rt)
-            return RTEffects(rt, Union{}, EFFECTS_TOTAL)
-        end
-        (; rt, exct, effects, refinements) = abstract_eval_special_value(interp, e, vtypes, sv)
-    else
-        @assert isempty(sv.tasks) # jwn
-        result = abstract_eval_statement_expr(interp, e, vtypes, sv)
-        reverse!(sv.tasks)
-        workloop(interp, sv)
-        result isa Future && (result = result[])
-        (; rt, exct, effects, refinements) = result
-        if effects.noub === NOUB_IF_NOINBOUNDS
-            if has_curr_ssaflag(sv, IR_FLAG_INBOUNDS)
-                effects = Effects(effects; noub=ALWAYS_FALSE)
-            elseif !propagate_inbounds(sv)
-                # The callee read our inbounds flag, but unless we propagate inbounds,
-                # we ourselves don't read our parent's inbounds.
-                effects = Effects(effects; noub=ALWAYS_TRUE)
-            end
-        end
-        e = e::Expr
-        @assert !isa(rt, TypeVar) "unhandled TypeVar"
-        rt = maybe_singleton_const(rt)
-        if !isempty(sv.pclimitations)
-            if rt isa Const || rt === Union{}
-                empty!(sv.pclimitations)
-            else
-                rt = LimitedAccuracy(rt, sv.pclimitations)
-                sv.pclimitations = IdSet{InferenceState}()
-            end
-        end
-    end
+function merge_override_effects!(interp::AbstractInterpreter, effects::Effects, sv::InferenceState)
     # N.B.: This only applies to the effects of the statement itself.
     # It is possible for arguments (GlobalRef/:static_parameter) to throw,
     # but these will be recomputed during SSA construction later.
@@ -3043,8 +3003,11 @@ function abstract_eval_statement(interp::AbstractInterpreter, @nospecialize(e), 
     effects = override_effects(effects, override)
     set_curr_ssaflag!(sv, flags_for_effects(effects), IR_FLAGS_EFFECTS)
     merge_effects!(interp, sv, effects)
+	return effects
+end
 
-    return RTEffects(rt, exct, effects, refinements)
+function abstract_eval_statement(interp::AbstractInterpreter, @nospecialize(e), vtypes::VarTable, sv::InferenceState)
+    @assert !isa(e, Union{Expr, PhiNode, NewvarNode})
 end
 
 function override_effects(effects::Effects, override::EffectsOverride)
@@ -3288,60 +3251,6 @@ function handle_control_backedge!(interp::AbstractInterpreter, frame::InferenceS
         end
     end
     return nothing
-end
-
-struct BasicStmtChange
-    changes::Union{Nothing,StateUpdate}
-    rt::Any # extended lattice element or `nothing` - `nothing` if this statement may not be used as an SSA Value
-    exct::Any
-    # TODO effects::Effects
-    refinements # ::Union{Nothing,SlotRefinement,Vector{Any}}
-    function BasicStmtChange(changes::Union{Nothing,StateUpdate}, rt::Any, exct::Any,
-                             refinements=nothing)
-        @nospecialize rt exct refinements
-        return new(changes, rt, exct, refinements)
-    end
-end
-
-@inline function abstract_eval_basic_statement(interp::AbstractInterpreter,
-    @nospecialize(stmt), pc_vartable::VarTable, frame::InferenceState)
-    if isa(stmt, NewvarNode)
-        changes = StateUpdate(stmt.slot, VarState(Bottom, true), false)
-        return BasicStmtChange(changes, nothing, Union{})
-    elseif !isa(stmt, Expr)
-        (; rt, exct) = abstract_eval_statement(interp, stmt, pc_vartable, frame)
-        return BasicStmtChange(nothing, rt, exct)
-    end
-    changes = nothing
-    hd = stmt.head
-    if hd === :(=)
-        (; rt, exct, refinements) = abstract_eval_statement(interp, stmt.args[2], pc_vartable, frame)
-        if rt === Bottom
-            return BasicStmtChange(nothing, Bottom, exct, refinements)
-        end
-        lhs = stmt.args[1]
-        if isa(lhs, SlotNumber)
-            changes = StateUpdate(lhs, VarState(rt, false), false)
-        elseif isa(lhs, GlobalRef)
-            handle_global_assignment!(interp, frame, lhs, rt)
-        elseif !isa(lhs, SSAValue)
-            merge_effects!(interp, frame, EFFECTS_UNKNOWN)
-        end
-        return BasicStmtChange(changes, rt, exct, refinements)
-    elseif hd === :method
-        fname = stmt.args[1]
-        if isa(fname, SlotNumber)
-            changes = StateUpdate(fname, VarState(Any, false), false)
-        end
-        return BasicStmtChange(changes, nothing, Union{})
-    elseif (hd === :code_coverage_effect || (
-            hd !== :boundscheck && # :boundscheck can be narrowed to Bool
-            is_meta_expr(stmt)))
-        return BasicStmtChange(nothing, Nothing, Bottom)
-    else
-        (; rt, exct, refinements) = abstract_eval_statement(interp, stmt, pc_vartable, frame)
-        return BasicStmtChange(nothing, rt, exct, refinements)
-    end
 end
 
 function update_bbstate!(𝕃ᵢ::AbstractLattice, frame::InferenceState, bb::Int, vartable::VarTable)
@@ -3601,8 +3510,80 @@ function typeinf_local(interp::AbstractInterpreter, frame::InferenceState)
                 # Fall through terminator - treat as regular stmt
             end
             # Process non control-flow statements
-            (; changes, rt, exct, refinements) = abstract_eval_basic_statement(interp,
-                stmt, currstate, frame)
+            @assert isempty(frame.tasks) # jwn
+            rt = nothing
+            exct = Bottom
+            changes = nothing
+            refinements = nothing
+            effects = EFFECTS_TOTAL
+            if isa(stmt, NewvarNode)
+                changes = StateUpdate(stmt.slot, VarState(Bottom, true), false)
+            elseif isa(stmt, PhiNode)
+                add_curr_ssaflag!(frame, IR_FLAGS_REMOVABLE)
+                # Implement convergence for PhiNodes. In particular, PhiNodes need to tmerge over
+                # the incoming values from all iterations, but `abstract_eval_phi` will only tmerge
+                # over the first and last iterations. By tmerging in the current old_rt, we ensure that
+                # we will not lose an intermediate value.
+                rt = abstract_eval_phi(interp, stmt, currstate, frame)
+                old_rt = frame.ssavaluetypes[frame.currpc]
+                rt = old_rt === NOT_FOUND ? rt : tmerge(typeinf_lattice(interp), old_rt, rt)
+            else
+                lhs = nothing
+                if isexpr(stmt, :(=))
+                    lhs = stmt.args[1]
+                    stmt = stmt.args[2]
+                end
+                if !isa(stmt, Expr)
+                    (; rt, exct, effects, refinements) = abstract_eval_special_value(interp, stmt, currstate, frame)
+                else
+                    hd = stmt.head
+                    if hd === :method
+                        fname = stmt.args[1]
+                        if isa(fname, SlotNumber)
+                            changes = StateUpdate(fname, VarState(Any, false), false)
+                        end
+                    elseif (hd === :code_coverage_effect || (
+                            hd !== :boundscheck && # :boundscheck can be narrowed to Bool
+                            is_meta_expr(stmt)))
+                        rt = Nothing
+                    else
+                        result = abstract_eval_statement_expr(interp, stmt, currstate, frame)
+                        reverse!(frame.tasks) # jwn
+                        workloop(interp, frame) # jwn
+                        result = result[]
+                        (; rt, exct, effects, refinements) = result
+                        if effects.noub === NOUB_IF_NOINBOUNDS
+                            if has_curr_ssaflag(frame, IR_FLAG_INBOUNDS)
+                                effects = Effects(effects; noub=ALWAYS_FALSE)
+                            elseif !propagate_inbounds(frame)
+                                # The callee read our inbounds flag, but unless we propagate inbounds,
+                                # we ourselves don't read our parent's inbounds.
+                                effects = Effects(effects; noub=ALWAYS_TRUE)
+                            end
+                        end
+                        @assert !isa(rt, TypeVar) "unhandled TypeVar"
+                        rt = maybe_singleton_const(rt)
+                        if !isempty(frame.pclimitations)
+                            if rt isa Const || rt === Union{}
+                                empty!(frame.pclimitations)
+                            else
+                                rt = LimitedAccuracy(rt, frame.pclimitations)
+                                frame.pclimitations = IdSet{InferenceState}()
+                            end
+                        end
+                    end
+                end
+                effects = merge_override_effects!(interp, effects, frame)
+                if lhs !== nothing && rt !== Bottom
+                    if isa(lhs, SlotNumber)
+                        changes = StateUpdate(lhs, VarState(rt, false), false)
+                    elseif isa(lhs, GlobalRef)
+                        handle_global_assignment!(interp, frame, lhs, rt)
+                    elseif !isa(lhs, SSAValue)
+                        merge_effects!(interp, frame, EFFECTS_UNKNOWN)
+                    end
+                end
+            end
             if !has_curr_ssaflag(frame, IR_FLAG_NOTHROW)
                 if exct !== Union{}
                     update_exc_bestguess!(interp, exct, frame)
