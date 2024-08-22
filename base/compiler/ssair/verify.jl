@@ -1,9 +1,11 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
 function maybe_show_ir(ir::IRCode)
-    if isdefined(Core, :Main)
+    if isdefined(Core, :Main) && isdefined(Core.Main, :Base)
         # ensure we use I/O that does not yield, as this gets called during compilation
         invokelatest(Core.Main.Base.show, Core.stdout, "text/plain", ir)
+    else
+        Core.show(ir)
     end
 end
 

@@ -258,19 +258,6 @@ function finish!(interp::AbstractInterpreter, caller::InferenceState;
     return nothing
 end
 
-function _typeinf(interp::AbstractInterpreter, frame::InferenceState)
-    typeinf_nocycle(interp, frame) || return false # frame is now part of a higher cycle
-    # with no active ip's, frame is done
-    frames = frame.callstack::Vector{AbsIntState}
-    if length(frames) == frame.cycleid
-        finish_nocycle(interp, frame)
-    else
-        @assert frame.cycleid != 0
-        finish_cycle(interp, frames, frame.cycleid)
-    end
-    return true
-end
-
 function finish_nocycle(::AbstractInterpreter, frame::InferenceState)
     finishinfer!(frame, frame.interp)
     opt = frame.result.src

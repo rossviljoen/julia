@@ -216,7 +216,7 @@ function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(f),
             if mi !== nothing && !const_prop_methodinstance_heuristic(interp, mi, arginfo, sv)
                 csig = get_compileable_sig(method, sig, match.sparams)
                 if csig !== nothing && csig !== sig
-                    abstract_call_method(interp, method, csig, match.sparams, multiple_matches, StmtInfo(false), sv)
+                    abstract_call_method(interp, method, csig, match.sparams, multiple_matches, StmtInfo(false), sv)::Future
                 end
             end
         end
@@ -1333,7 +1333,7 @@ function const_prop_call(interp::AbstractInterpreter,
     end
     # perform fresh constant prop'
     inf_result = InferenceResult(mi, argtypes, overridden_by_const)
-    frame = InferenceState(inf_result, #=cache_mode=#:local, interp)
+    frame = InferenceState(inf_result, #=cache_mode=#:local, interp) # jwn
     if frame === nothing
         add_remark!(interp, sv, "[constprop] Could not retrieve the source")
         return nothing # this is probably a bad generated function (unsound), but just ignore it
@@ -2552,7 +2552,7 @@ function abstract_eval_cfunction(interp::AbstractInterpreter, e::Expr, vtypes::U
     # this may be the wrong world for the call,
     # but some of the result is likely to be valid anyways
     # and that may help generate better codegen
-    abstract_call(interp, ArgInfo(nothing, at), StmtInfo(false), sv)
+    abstract_call(interp, ArgInfo(nothing, at), StmtInfo(false), sv)::Future
     rt = e.args[1]
     isa(rt, Type) || (rt = Any)
     return RTEffects(rt, Any, EFFECTS_UNKNOWN)
@@ -3352,27 +3352,45 @@ function update_cycle_worklists!(callback, frame::InferenceState)
 end
 
 # make as much progress on `frame` as possible (without handling cycles)
-function typeinf_local(interp::AbstractInterpreter, frame::InferenceState)
+struct CurrentState
+    result::Future
+    currstate::VarTable
+    bbstart::Int
+    bbend::Int
+    CurrentState(result::Future, currstate::VarTable, bbstart::Int, bbend::Int) = new(result, currstate, bbstart, bbend)
+    CurrentState() = new()
+end
+function typeinf_local(interp::AbstractInterpreter, frame::InferenceState, nextresult::CurrentState)
     @assert !is_inferred(frame)
     W = frame.ip
     ssavaluetypes = frame.ssavaluetypes
     bbs = frame.cfg.blocks
     nbbs = length(bbs)
     𝕃ᵢ = typeinf_lattice(interp)
-
+    states = frame.bb_vartables
     currbb = frame.currbb
+    currpc = frame.currpc
+
+    if isdefined(nextresult, :result)
+        # for reasons that are fairly unclear, some state is arbitrarily on the stack instead in the InferenceState as normal
+        bbstart = nextresult.bbstart
+        bbend = nextresult.bbend
+        currstate = nextresult.currstate
+        @goto injectresult
+    end
+
     if currbb != 1
         currbb = frame.currbb = _bits_findnext(W.bits, 1)::Int # next basic block
     end
-
-    states = frame.bb_vartables
     currstate = copy(states[currbb]::VarTable)
     while currbb <= nbbs
         delete!(W, currbb)
         bbstart = first(bbs[currbb].stmts)
         bbend = last(bbs[currbb].stmts)
 
-        for currpc in bbstart:bbend
+        currpc = bbstart - 1
+        while currpc < bbend
+            currpc += 1
             frame.currpc = currpc
             empty_backedges!(frame, currpc)
             stmt = frame.src.code[currpc]
@@ -3484,14 +3502,14 @@ function typeinf_local(interp::AbstractInterpreter, frame::InferenceState)
                             return caller.ssavaluetypes[caller_pc] !== Any
                         end
                     end
-                    ssavaluetypes[frame.currpc] = Any
+                    ssavaluetypes[currpc] = Any
                     @goto find_next_bb
                 elseif isa(stmt, EnterNode)
                     ssavaluetypes[currpc] = Any
                     add_curr_ssaflag!(frame, IR_FLAG_NOTHROW)
                     if isdefined(stmt, :scope)
                         scopet = abstract_eval_value(interp, stmt.scope, currstate, frame)
-                        handler = gethandler(frame, frame.currpc+1)::TryCatchFrame
+                        handler = gethandler(frame, currpc + 1)::TryCatchFrame
                         @assert handler.scopet !== nothing
                         if !⊑(𝕃ᵢ, scopet, handler.scopet)
                             handler.scopet = tmerge(𝕃ᵢ, scopet, handler.scopet)
@@ -3525,7 +3543,7 @@ function typeinf_local(interp::AbstractInterpreter, frame::InferenceState)
                 # over the first and last iterations. By tmerging in the current old_rt, we ensure that
                 # we will not lose an intermediate value.
                 rt = abstract_eval_phi(interp, stmt, currstate, frame)
-                old_rt = frame.ssavaluetypes[frame.currpc]
+                old_rt = frame.ssavaluetypes[currpc]
                 rt = old_rt === NOT_FOUND ? rt : tmerge(typeinf_lattice(interp), old_rt, rt)
             else
                 lhs = nothing
@@ -3547,9 +3565,20 @@ function typeinf_local(interp::AbstractInterpreter, frame::InferenceState)
                             is_meta_expr(stmt)))
                         rt = Nothing
                     else
-                        result = abstract_eval_statement_expr(interp, stmt, currstate, frame)
-                        reverse!(frame.tasks) # jwn
-                        workloop(interp, frame) # jwn
+                        result = abstract_eval_statement_expr(interp, stmt, currstate, frame)::Future
+                        if !result.completed || !isempty(frame.tasks)
+                            return CurrentState(result, currstate, bbstart, bbend)
+                            @label injectresult
+                            # reload local variables
+                            stmt = frame.src.code[currpc]
+                            changes = nothing
+                            lhs = nothing
+                            if isexpr(stmt, :(=))
+                                lhs = stmt.args[1]
+                                stmt = stmt.args[2]
+                            end
+                            result = nextresult.result::Future{RTEffects}
+                        end
                         result = result[]
                         (; rt, exct, effects, refinements) = result
                         if effects.noub === NOUB_IF_NOINBOUNDS
@@ -3646,7 +3675,7 @@ function typeinf_local(interp::AbstractInterpreter, frame::InferenceState)
         end
     end # while currbb <= nbbs
 
-    nothing
+    return CurrentState()
 end
 
 function apply_refinement!(𝕃ᵢ::AbstractLattice, slot::SlotNumber, @nospecialize(newtyp),
@@ -3694,32 +3723,53 @@ function condition_object_change(currstate::VarTable, condt::Conditional,
     return StateUpdate(condslot, VarState(newcondt, vtype.undef), false)
 end
 
-# make as much progress on `frame` as possible (by handling cycles)
 function typeinf_nocycle(interp::AbstractInterpreter, frame::InferenceState)
-    typeinf_local(interp, frame)
-    @assert isempty(frame.ip)
-    callstack = frame.callstack::Vector{AbsIntState}
-    frame.cycleid == length(callstack) && return true
-
-    no_active_ips_in_callers = false
+    nextresult = CurrentState()
     while true
-        # If the current frame is not the top part of a cycle, continue to the top of the cycle before resuming work
-        frame.cycleid == frame.frameid || return false
-        # If done, return and finalize this cycle
-        no_active_ips_in_callers && return true
-        # Otherwise, do at least one iteration over the entire current cycle
-        no_active_ips_in_callers = true
-        for i = reverse(frame.cycleid:length(callstack))
-            caller = callstack[i]::InferenceState
-            if !isempty(caller.ip)
-                # Note that `typeinf_local(interp, caller)` can potentially modify the other frames
-                # `frame.cycleid`, which is why making incremental progress requires the
-                # outer while loop.
-                typeinf_local(interp, caller)
-                no_active_ips_in_callers = false
-            end
-            update_valid_age!(caller, frame.valid_worlds)
-        end
+        @assert isempty(frame.tasks) # jwn
+        nextresult = typeinf_local(interp, frame, nextresult)
+        # must drain the workloop, since some scheduled work doesn't affect the result (e.g.
+        # cfunction or abstract_call_method on get_compileable_sig), but still must be finished up
+        # since it may see and change the local variables of the InferenceState at currpc
+        reverse!(frame.tasks) # jwn
+        workloop(interp, frame) # jwn
+        isdefined(nextresult, :result) || break
     end
+    @assert isempty(frame.ip)
+end
+
+# make as much progress on `frame` as possible (by handling cycles)
+function _typeinf(interp::AbstractInterpreter, frame::InferenceState)
+    typeinf_nocycle(interp, frame)
+
+    callstack = frame.callstack::Vector{AbsIntState}
+    if frame.cycleid == length(callstack)
+        # with no active ip's and no cycles, frame is done
+        finish_nocycle(interp, frame)
+    else
+        no_active_ips_in_callers = false
+        while true
+            @assert frame.cycleid != 0
+            # If the current frame is not the top part of a cycle, continue to the top of the cycle before resuming work
+            frame.cycleid == frame.frameid || return false
+            # If done, return and finalize this cycle
+            no_active_ips_in_callers && break
+            # Otherwise, do at least one iteration over the entire current cycle
+            no_active_ips_in_callers = true
+            for i = reverse(frame.cycleid:length(callstack))
+                caller = callstack[i]::InferenceState
+                if !isempty(caller.ip)
+                    # Note that `typeinf_local(interp, caller)` can potentially modify the other frames
+                    # `frame.cycleid`, which is why making incremental progress requires the
+                    # outer while loop.
+                    typeinf_nocycle(interp, caller)
+                    no_active_ips_in_callers = false
+                end
+                update_valid_age!(caller, frame.valid_worlds)
+            end
+        end
+        finish_cycle(interp, callstack, frame.cycleid)
+    end
+
     return true
 end
