@@ -921,8 +921,7 @@ function typeinf_edge(interp::AbstractInterpreter, method::Method, @nospecialize
         end
         assign_parentchild!(frame, caller)
         # split off the rest of this (the recursion call) into a separate work thunk
-        recursive = false
-        return Future{MethodCallResult}(recursive, interp, caller) do interp, caller
+        return Future{MethodCallResult}(false, interp, caller) do interp, caller
             update_valid_age!(caller, frame.valid_worlds)
             local isinferred = is_inferred(frame)
             local edge = isinferred ? mi : nothing
