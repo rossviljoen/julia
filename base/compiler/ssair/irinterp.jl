@@ -149,7 +149,7 @@ function reprocess_instruction!(interp::AbstractInterpreter, inst::Instruction, 
             @assert isempty(irsv.tasks) # jwn
             result = abstract_eval_statement_expr(interp, stmt, nothing, irsv)
             reverse!(irsv.tasks)
-            workloop(interp, irsv)
+            while doworkloop(interp, irsv) end
             result isa Future && (result = result[])
             (; rt, effects) = result
             add_flag!(inst, flags_for_effects(effects))

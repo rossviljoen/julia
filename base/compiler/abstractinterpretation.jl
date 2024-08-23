@@ -3723,53 +3723,66 @@ function condition_object_change(currstate::VarTable, condt::Conditional,
     return StateUpdate(condslot, VarState(newcondt, vtype.undef), false)
 end
 
-function typeinf_nocycle(interp::AbstractInterpreter, frame::InferenceState)
-    nextresult = CurrentState()
-    while true
-        @assert isempty(frame.tasks) # jwn
-        nextresult = typeinf_local(interp, frame, nextresult)
-        # must drain the workloop, since some scheduled work doesn't affect the result (e.g.
-        # cfunction or abstract_call_method on get_compileable_sig), but still must be finished up
-        # since it may see and change the local variables of the InferenceState at currpc
-        reverse!(frame.tasks) # jwn
-        workloop(interp, frame) # jwn
-        isdefined(nextresult, :result) || break
-    end
-    @assert isempty(frame.ip)
-end
-
 # make as much progress on `frame` as possible (by handling cycles)
 function _typeinf(interp::AbstractInterpreter, frame::InferenceState)
-    typeinf_nocycle(interp, frame)
-
     callstack = frame.callstack::Vector{AbsIntState}
-    if frame.cycleid == length(callstack)
-        # with no active ip's and no cycles, frame is done
-        finish_nocycle(interp, frame)
-    else
-        no_active_ips_in_callers = false
-        while true
-            @assert frame.cycleid != 0
-            # If the current frame is not the top part of a cycle, continue to the top of the cycle before resuming work
-            frame.cycleid == frame.frameid || return false
-            # If done, return and finalize this cycle
-            no_active_ips_in_callers && break
-            # Otherwise, do at least one iteration over the entire current cycle
-            no_active_ips_in_callers = true
-            for i = reverse(frame.cycleid:length(callstack))
-                caller = callstack[i]::InferenceState
-                if !isempty(caller.ip)
-                    # Note that `typeinf_local(interp, caller)` can potentially modify the other frames
-                    # `frame.cycleid`, which is why making incremental progress requires the
-                    # outer while loop.
-                    typeinf_nocycle(interp, caller)
-                    no_active_ips_in_callers = false
+    nextstates = Tuple{InferenceState,CurrentState}[]
+    takenext = frame.frameid
+    nextresult = CurrentState()
+    while takenext >= frame.frameid
+        callee = takenext == 0 ? frame : callstack[takenext]::InferenceState
+        if !isempty(callstack)
+            topcallee = (callstack[end]::InferenceState)
+            if topcallee.cycleid != callee.cycleid
+                if isdefined(nextresult, :result)
+                    push!(nextstates, (callee, nextresult))
                 end
-                update_valid_age!(caller, frame.valid_worlds)
+                callee = topcallee
+                nextresult = CurrentState()
             end
         end
-        finish_cycle(interp, callstack, frame.cycleid)
+        if !isempty(nextstates) && nextstates[end][1].frameid == callee.frameid
+            @assert !isdefined(nextresult, :result)
+            callee, nextresult = pop!(nextstates)
+        end
+        if doworkloop(interp, callee)
+            # First drain the workloop. Note that since some scheduled work doesn't
+            # affect the result (e.g. cfunction or abstract_call_method on
+            # get_compileable_sig), but still must be finished up since it may see and
+            # change the local variables of the InferenceState at currpc, we do this
+            # even if the nextresult status is already completed.
+            continue
+        elseif isdefined(nextresult, :result) || !isempty(callee.ip)
+            # Next make progress on this frame
+            prev = length(callee.tasks) + 1
+            nextresult = typeinf_local(interp, callee, nextresult)
+            reverse!(callee.tasks, prev)
+        elseif callee.cycleid == length(callstack)
+            # With no active ip's and no cycles, frame is done
+            finish_nocycle(interp, callee)
+            takenext = length(callstack)
+        elseif callee.cycleid == callee.frameid
+            # If the current frame is the top part of a cycle, check if the whole cycle
+            # is done, and if not, pick the next item to work on.
+            no_active_ips_in_cycle = isempty(nextstates) || nextstates[end][1].cycleid < callee.cycleid
+            if no_active_ips_in_cycle
+                for i = callee.cycleid:length(callstack)
+                    caller = callstack[i]::InferenceState
+                    @assert caller.cycleid == callee.cycleid
+                    if !isempty(caller.ip)
+                        no_active_ips_in_cycle = false
+                        break
+                    end
+                end
+            end
+            if no_active_ips_in_cycle
+                finish_cycle(interp, callstack, callee.cycleid)
+            end
+            takenext = length(callstack)
+        else
+            takenext = takenext - 1
+        end
     end
-
-    return true
+    @assert isempty(nextstates)
+    return is_inferred(frame)
 end

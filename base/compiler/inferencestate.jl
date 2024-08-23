@@ -1158,29 +1158,31 @@ function Future{T}(f, immediate::Bool, interp::AbstractInterpreter, sv::AbsIntSt
 end
 
 """
-    workloop(args...)
+    doworkloop(args...)
 
-Run the tasks inside the abstract interpreter until the queue of them is empty.
+Run a tasks inside the abstract interpreter, returning false if there are none.
 Tasks will be run in DFS post-order tree order, such that all child tasks will
 be run in the order scheduled, prior to running any subsequent tasks. This
 allows tasks to generate more child tasks, which will be run before anything else.
 Each task will be run repeatedly when returning `false`, until it returns `true`.
 """
-function workloop(interp::AbstractInterpreter, sv::AbsIntState)
+function doworkloop(interp::AbstractInterpreter, sv::AbsIntState)
     tasks = sv.tasks
-    while !isempty(tasks)
-        prev = length(tasks)
-        task = pop!(tasks)
-        completed = task(interp, sv)
-        tasks = sv.tasks # drop gc root over the previous call
-        completed isa Bool || throw(TypeError(:return, "", Bool, task)) # print the task on failure as part of the error message, instead of just "@ workloop"
-        completed || push!(tasks, task)
-        # efficient post-order visitor: items pushed are executed in reverse post order such
-        # that later items are executed before earlier ones, but are fully executed
-        # (including any dependencies scheduled by them) before going on to the next item
-        reverse!(tasks, #=start=#prev)
-    end
+    prev = length(tasks)
+    prev == 0 && return false
+    task = pop!(tasks)
+    completed = task(interp, sv)
+    tasks = sv.tasks # allow dropping gc root over the previous call
+    completed isa Bool || throw(TypeError(:return, "", Bool, task)) # print the task on failure as part of the error message, instead of just "@ workloop:line"
+    completed || push!(tasks, task)
+    # efficient post-order visitor: items pushed are executed in reverse post order such
+    # that later items are executed before earlier ones, but are fully executed
+    # (including any dependencies scheduled by them) before going on to the next item
+    reverse!(tasks, #=start=#prev)
+    return true
 end
+
+
 #macro workthunk(name::Symbol, body)
 #    name = esc(name)
 #    body = esc(body)
